@@ -15,6 +15,8 @@ set orig_proj_dir "[file normalize "$origin_dir/"]"
 # Create project
 create_project ${_xil_proj_name_} ./${_xil_proj_name_} -part xczu49dr-ffvf1760-2-e
 
+set_property XPM_LIBRARIES {XPM_FIFO XPM_MEMORY} [current_project]
+
 # Set the directory path for the new project
 set proj_dir [get_property directory [current_project]]
 
@@ -56,7 +58,7 @@ set files [list \
 add_files -fileset $obj $files
 
 # Source Block Design.
-set file "[file normalize "$origin_dir/bd/bd_216_2022-1.tcl"]"
+set file "[file normalize "$origin_dir/bd/bd_216_2023-1.tcl"]"
 source $file
 
 # Update compile order.
