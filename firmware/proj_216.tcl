@@ -76,4 +76,6 @@ set files [list \
 ]
 add_files -fileset $obj $files
 
-set_property strategy "Performance_Explore" [get_runs impl_1]
+# Synthesis and implementation strategies
+set_property strategy "Flow_PerfOptimized_high"   [get_runs synth_1]
+set_property strategy "Performance_NetDelay_high" [get_runs impl_1]
