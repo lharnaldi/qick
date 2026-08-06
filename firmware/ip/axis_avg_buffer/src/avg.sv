@@ -1,3 +1,13 @@
+// Description: 
+// AVG block is a FSM that receives an input stream of samples (din), and controls the interface to a memory to capture and store them. It has two different work modes.
+// If PHOTON_MODE=0, the data stored is the accumulated value of the input data during a determined number of samples.
+// If PHOTON_MODE=1, the data stored is the number of times the data has gone over and below configurable thresholds (H & L THRSH REGs) - edge counter mode
+// Capturing is initiated by an external trigger after the buffer has been enabled. Number of processed samples and address where to store them are configurable.
+// When number of captured samples is reached, it can be triggered again.
+//
+// Parameters: 
+// N: memory depth as 2**N; B: memory data width
+
 // Data is I,Q.
 // I: lower B bits.
 // Q: upper B bits.
@@ -10,6 +20,7 @@ module avg (
 	trigger_i	,
 
 	// Data input.
+	din_valid_i	,
 	din_i		,
 
 	// Memory interface.
@@ -20,7 +31,10 @@ module avg (
 	// Registers.
 	START_REG	,
 	ADDR_REG	,
-	LEN_REG
+	LEN_REG     ,
+	PHOTON_MODE_REG,
+	H_THRSH_REG ,
+	L_THRSH_REG
 	);
 
 ////////////////
@@ -40,6 +54,7 @@ input				clk;
 
 input				trigger_i;
 
+input				din_valid_i;
 input	[2*B-1:0]	din_i;
 
 output				mem_we_o;
@@ -49,6 +64,9 @@ output 	[4*B-1:0]	mem_di_o;
 input				START_REG;
 input	[N-1:0]		ADDR_REG;
 input	[31:0]		LEN_REG;
+input               PHOTON_MODE_REG;
+input   [B-1:0]     H_THRSH_REG;
+input   [B-1:0]     L_THRSH_REG;
 
 //////////////////////
 // Internal signals //
@@ -72,21 +90,29 @@ reg			avg_state;
 reg			qout_state;
 reg			write_mem_state;
 
+// Edge counter states.
+reg         high_state;
+reg         high_state_reg;
+
 // Counter.
 reg			[31:0]		cnt;
 
 // Registers.
 reg			[N-1:0]		addr_r;
 reg			[31:0]		len_r;
+reg                     photon_mode_r;
+reg  signed [B-1:0]     h_thrsh_r;
+reg  signed [B-1:0]     l_thrsh_r;
 
 // Input data.
 wire signed	[B-1:0]		din_ii, din_qq;
 
 // Accumulators.
 reg	signed 	[2*B-1:0]	acc_i, acc_q;
+reg         [4*B-1:0]	acc_photon;
 
 // Quantized outputs.
-reg	signed	[2*B-1:0]	out_i_r, out_q_r;
+reg         [4*B-1:0]	out_result_r;
 
 
 //////////////////
@@ -108,14 +134,20 @@ always @(posedge clk) begin
 		// Registers.
 		addr_r	<= 0;
 		len_r	<= 0;
+		photon_mode_r <= 1'b0;
+		h_thrsh_r <= 0;
+		l_thrsh_r <= 0;
+		high_state <= 1'b0;
+		high_state_reg <= 1'b0;
 
 		// Accumulators.
 		acc_i	<= 0;
 		acc_q	<= 0;
+		acc_photon <= 0;
 		
 		// Quantized outputs.
-		out_i_r	<= 0;
-		out_q_r	<= 0;
+		out_result_r <= 0;
+
 	end
 	else begin
 		// State register.
@@ -134,7 +166,7 @@ always @(posedge clk) begin
 					state <= AVG_ST;
 
 			AVG_ST:
-				if ( cnt == len_r-1 )
+				if ( cnt == len_r && din_valid_i == 1'b1 )
 					state <= QOUT_ST;
 
 			QOUT_ST:
@@ -152,35 +184,57 @@ always @(posedge clk) begin
 		endcase
 
 		// Counter.
-		if ( avg_state == 1'b1 )
-			cnt	<= cnt + 1;
-		else
+		if ( avg_state == 1'b1 ) begin
+			if ( din_valid_i == 1'b1)
+				cnt	<= cnt + 1;
+		end
+		else begin
 			cnt <= 0;
+		end
 
 		// Registers.
 		if ( start_state == 1'b1 ) begin
 			addr_r	<= ADDR_REG;
-			len_r	<= LEN_REG;
+			len_r	<= LEN_REG - 1;
+			photon_mode_r <= PHOTON_MODE_REG;
+			h_thrsh_r <= H_THRSH_REG;
+			l_thrsh_r <= L_THRSH_REG;
 		end
 		else if ( write_mem_state == 1'b1 ) begin
 			addr_r	<= addr_r + 1;
 		end
 
 		// Accumulators.
-		if ( trigger_state == 1'b1) begin
-			acc_i	<= 0;
-			acc_q	<= 0;
+		if ( trigger_state == 1'b1 ) begin
+			acc_i	   <= 0;
+			acc_q	   <= 0;
+			acc_photon <= 0;
+			high_state <= 1'b0;
+			high_state_reg <= 1'b0;
 		end
-		else if ( avg_state == 1'b1 ) begin
-			acc_i	<= acc_i + din_ii;
-			acc_q	<= acc_q + din_qq;
+		else if ( avg_state == 1'b1 && din_valid_i == 1'b1 ) begin
+			// Accumulator counter.
+			if ( photon_mode_r == 1'b0 ) begin
+				acc_i	<= acc_i + din_ii;
+				acc_q	<= acc_q + din_qq;
+			end
+			// Rising edge counter.
+			else if ( high_state == 1'b1 && high_state_reg == 1'b0)
+				acc_photon <= acc_photon + 1;
 		end
+
+		// Edge counter detect.
+		high_state_reg <= high_state;
+		if ( din_ii > h_thrsh_r )
+			high_state <= 1'b1;
+		else if ( din_ii < l_thrsh_r )
+			high_state <= 1'b0;
 		
 		// Quantized outputs.
-		if ( qout_state == 1'b1) begin
-			out_i_r	<= acc_i;
-			out_q_r	<= acc_q;
-		end
+        if ( photon_mode_r == 1'b0 )
+            out_result_r <= {acc_q,acc_i};
+        else
+            out_result_r <= acc_photon;
 	end
 end 
 
@@ -218,7 +272,7 @@ end
 // Assign outputs.
 assign mem_we_o		= write_mem_state;
 assign mem_addr_o	= addr_r;
-assign mem_di_o		= {out_q_r,out_i_r};
+assign mem_di_o		= out_result_r;
 
 endmodule
 
